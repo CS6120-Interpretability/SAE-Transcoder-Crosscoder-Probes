@@ -1,9 +1,16 @@
+"""
+Generate supplemental figures used in the rebuttal analysis.
+
+This script compares SAE performance across layers (largest L0 per layer) and
+contrasts old vs. new mean-difference feature selection runs, emitting figures
+into ``rebuttal_plots/``.
+"""
 # %%
 import pandas as pd
 all_data = pd.read_csv("results/sae_probes_gemma-2-9b/normal_setting/all_metrics.csv")
 # %%
 
-from utils_sae import get_sae_layers_extra, get_gemma_2_9b_sae_ids
+from legacy_sae import get_sae_layers_extra, get_gemma_2_9b_sae_ids
 
 # Get all layers
 layers = get_sae_layers_extra("gemma-2-9b")

@@ -1,12 +1,35 @@
-import pandas as pd
-import numpy as np
-from tqdm import tqdm
-from utils_data import get_xy_traintest, get_numbered_binary_tags, get_dataset_sizes, get_layers, get_datasets
-from utils_training import find_best_mlp, find_best_knn, find_best_pcareg, find_best_reg, find_best_xgboost
-import numpy as np
-from utils_data import get_xy_traintest,get_xy_traintest_specify, get_training_sizes, get_class_imbalance, get_classimabalance_num_train, corrupt_ytrain, get_corrupt_frac, get_OOD_traintest, get_OOD_datasets, get_disagree_glue, get_glue_traintest
-from utils_sae import get_xy_OOD_sae, get_xy_glue_sae
 import os
+from typing import Optional, Union
+
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+
+from utils_data import (
+    corrupt_ytrain,
+    get_class_imbalance,
+    get_classimabalance_num_train,
+    get_corrupt_frac,
+    get_datasets,
+    get_disagree_glue,
+    get_glue_traintest,
+    get_layers,
+    get_numbered_binary_tags,
+    get_OOD_datasets,
+    get_OOD_traintest,
+    get_training_sizes,
+    get_xy_traintest,
+    get_xy_traintest_specify,
+    get_dataset_sizes,
+)
+from legacy_sae import get_xy_glue_sae, get_xy_OOD_sae
+from utils_training import (
+    find_best_knn,
+    find_best_mlp,
+    find_best_pcareg,
+    find_best_reg,
+    find_best_xgboost,
+)
 
 dataset_sizes = get_dataset_sizes()
 datasets = get_numbered_binary_tags()
@@ -16,14 +39,41 @@ methods = {'logreg': find_best_reg, 'pca': find_best_pcareg, 'knn': find_best_kn
 '''
 FUNCTIONS FOR STANDARD CONDITIONS 
 '''
-def run_baseline_dataset_layer(layer, numbered_dataset, method_name, model_name = 'gemma-2-9b'):
+def run_baseline_dataset_layer(
+    layer: Union[int, str],
+    numbered_dataset: str,
+    method_name: str,
+    model_name: str = 'gemma-2-9b',
+    hook_name: Optional[str] = None,
+) -> Optional[bool]:
+    """
+    Train a single baseline probe on one dataset/layer pair and persist the
+    resulting metrics. A cached result is returned early if the CSV exists.
+
+    Args:
+        layer: Residual stream layer index or ``"embed"`` token embedding hook.
+        numbered_dataset: Dataset identifier in the ``{id}_{name}`` format.
+        method_name: Key from the ``methods`` mapping (logreg, pca, knn, xgboost, mlp).
+        model_name: Underlying model whose activations are used.
+        hook_name: Optional full hook name to override ``layer``.
+
+    Returns:
+        ``True`` if a run was executed and saved, ``None`` when skipped because
+        metrics already exist.
+    """
     savepath = f'data/baseline_results_{model_name}/normal/allruns/layer{layer}_{numbered_dataset}_{method_name}.csv'
     os.makedirs(os.path.dirname(savepath), exist_ok=True)
     if os.path.exists(savepath):
         return None
     size = dataset_sizes[numbered_dataset]
     num_train = min(size-100, 1024)
-    X_train, y_train, X_test, y_test = get_xy_traintest(num_train, numbered_dataset, layer,  model_name = model_name)
+    X_train, y_train, X_test, y_test = get_xy_traintest(
+        num_train,
+        numbered_dataset,
+        layer,
+        model_name = model_name,
+        hook_name=hook_name,
+    )
     
     # Run method and get metrics
     method = methods[method_name]
@@ -37,18 +87,27 @@ def run_baseline_dataset_layer(layer, numbered_dataset, method_name, model_name 
     return True
     
 
-def run_all_baseline_normal(model_name = 'gemma-2-9b'):
+def run_all_baseline_normal(model_name: str = 'gemma-2-9b', hook_name: Optional[str] = None) -> None:
+    """
+    Iterate through every dataset/method/layer combination for the standard
+    condition and launch baseline probe training runs. Existing CSVs are left
+    untouched, which makes this function safe to parallelize.
+
+    Args:
+        model_name: Which model's activations to consume.
+        hook_name: Optional full hook name to override the layer selection.
+    """
     shuffled_datasets = get_datasets().copy()
     np.random.shuffle(shuffled_datasets)
     for method_name in methods.keys():
         for layer in get_layers(model_name):
             for dataset in shuffled_datasets:
                 #print(layer, dataset, method_name)
-                val = run_baseline_dataset_layer(layer, dataset, method_name, model_name = model_name)
+                val = run_baseline_dataset_layer(layer, dataset, method_name, model_name = model_name, hook_name=hook_name)
                 #print(val)
 
-def coalesce_all_baseline_normal(model_name = 'gemma-2-9b'):
-    # takes individual csvs and makes it into one big csv
+def coalesce_all_baseline_normal(model_name: str = 'gemma-2-9b') -> None:
+    """Concatenate per-run CSVs for the standard condition into per-layer results."""
     i = 0
     for layer in get_layers(model_name):
         all_results = []
@@ -74,7 +133,30 @@ def coalesce_all_baseline_normal(model_name = 'gemma-2-9b'):
 FUNCTIONS FOR DATA SCARCITY CONDITION
 '''
 
-def run_baseline_scarcity(num_train, numbered_dataset, method_name, model_name = 'gemma-2-9b',layer = 20):
+def run_baseline_scarcity(
+    num_train: int,
+    numbered_dataset: str,
+    method_name: str,
+    model_name: str = 'gemma-2-9b',
+    layer: Union[int, str] = 20,
+    hook_name: Optional[str] = None,
+) -> Optional[bool]:
+    """
+    Train a baseline probe under data-scarcity by subsampling ``num_train`` and
+    writing metrics to disk if not present already.
+
+    Args:
+        num_train: Number of training examples to sample.
+        numbered_dataset: Dataset identifier in the ``{id}_{name}`` format.
+        method_name: Key from the ``methods`` mapping.
+        model_name: Which model's activations to consume.
+        layer: Residual layer or ``"embed"`` hook.
+        hook_name: Optional full hook name to override ``layer``.
+
+    Returns:
+        ``True`` if a run executed and saved, ``None`` when skipped because the
+        file exists or the dataset is too small.
+    """
     savepath = f'data/baseline_results_{model_name}/scarcity/allruns/layer{layer}_{numbered_dataset}_{method_name}_numtrain{num_train}.csv'
     os.makedirs(os.path.dirname(savepath), exist_ok=True)
     if os.path.exists(savepath):
@@ -83,7 +165,13 @@ def run_baseline_scarcity(num_train, numbered_dataset, method_name, model_name =
     if num_train > size - 100:
         # we dont have enough test examples
         return 
-    X_train, y_train, X_test, y_test = get_xy_traintest(num_train, numbered_dataset, layer, model_name = model_name)
+    X_train, y_train, X_test, y_test = get_xy_traintest(
+        num_train,
+        numbered_dataset,
+        layer,
+        model_name = model_name,
+        hook_name=hook_name,
+    )
     # Run method and get metrics
     method = methods[method_name]
     metrics = method(X_train, y_train, X_test, y_test)
@@ -96,7 +184,20 @@ def run_baseline_scarcity(num_train, numbered_dataset, method_name, model_name =
     return True
 
 
-def run_all_baseline_scarcity(model_name = 'gemma-2-9b', layer = 20):
+def run_all_baseline_scarcity(
+    model_name: str = 'gemma-2-9b',
+    layer: Union[int, str] = 20,
+    hook_name: Optional[str] = None,
+) -> None:
+    """
+    Sweep scarcity settings (train sizes) across datasets and methods for a
+    single layer, skipping already-computed runs.
+
+    Args:
+        model_name: Which model's activations to consume.
+        layer: Residual layer or embedding hook to evaluate.
+        hook_name: Optional full hook name to override ``layer``.
+    """
     assert layer in get_layers(model_name)
     shuffled_datasets = get_datasets().copy()
     np.random.shuffle(shuffled_datasets)
@@ -104,12 +205,19 @@ def run_all_baseline_scarcity(model_name = 'gemma-2-9b', layer = 20):
     for method_name in methods.keys():
         for train in train_sizes:
             for dataset in shuffled_datasets:
-                val = run_baseline_scarcity(train, dataset, method_name, model_name = model_name, layer = layer)
+                val = run_baseline_scarcity(
+                    train,
+                    dataset,
+                    method_name,
+                    model_name = model_name,
+                    layer = layer,
+                    hook_name=hook_name,
+                )
                 #print(method_name, train, dataset, val)
 
 
-def coalesce_all_scarcity(model_name = 'gemma-2-9b', layer = 20):
-    # takes individual csvs and makes it into one big csv
+def coalesce_all_scarcity(model_name: str = 'gemma-2-9b', layer: Union[int, str] = 20) -> None:
+    """Group per-run scarcity CSVs by dataset and overall summary outputs."""
     all_results = []
     train_sizes = get_training_sizes()
     
@@ -153,7 +261,29 @@ FUNCTIONS FOR CLASS IMBALANCE CONDITION
 '''
 
 
-def run_baseline_class_imbalance(dataset_frac, numbered_dataset, method_name, model_name = 'gemma-2-9b',layer = 20):
+def run_baseline_class_imbalance(
+    dataset_frac: float,
+    numbered_dataset: str,
+    method_name: str,
+    model_name: str = 'gemma-2-9b',
+    layer: Union[int, str] = 20,
+    hook_name: Optional[str] = None,
+) -> Optional[bool]:
+    """
+    Train a baseline probe with a specified positive-class ratio.
+
+    Args:
+        dataset_frac: Desired positive label ratio in training data.
+        numbered_dataset: Dataset identifier in the ``{id}_{name}`` format.
+        method_name: Key from the ``methods`` mapping.
+        model_name: Which model's activations to consume.
+        layer: Residual layer or embedding hook to evaluate.
+        hook_name: Optional full hook name to override ``layer``.
+
+    Returns:
+        ``True`` if a run executed and saved, ``None`` when skipped because the
+        CSV already exists.
+    """
     assert 0<dataset_frac<1
     dataset_frac = round(dataset_frac * 20) / 20
     savepath = f'data/baseline_results_{model_name}/imbalance/allruns/layer{layer}_{numbered_dataset}_{method_name}_frac{dataset_frac}.csv'
@@ -161,7 +291,15 @@ def run_baseline_class_imbalance(dataset_frac, numbered_dataset, method_name, mo
     if os.path.exists(savepath):
         return None
     num_train, num_test = get_classimabalance_num_train(numbered_dataset)
-    X_train, y_train, X_test, y_test = get_xy_traintest_specify(num_train, numbered_dataset, layer, pos_ratio = dataset_frac,  model_name = model_name, num_test = num_test)
+    X_train, y_train, X_test, y_test = get_xy_traintest_specify(
+        num_train,
+        numbered_dataset,
+        layer,
+        pos_ratio = dataset_frac,
+        model_name = model_name,
+        num_test = num_test,
+        hook_name=hook_name,
+    )
     # Run method and get metrics
     method = methods[method_name]
     metrics = method(X_train, y_train, X_test, y_test)
@@ -172,7 +310,19 @@ def run_baseline_class_imbalance(dataset_frac, numbered_dataset, method_name, mo
     pd.DataFrame([row]).to_csv(savepath, index=False)
     return True
 
-def run_all_baseline_class_imbalance(model_name = 'gemma-2-9b', layer = 20):
+def run_all_baseline_class_imbalance(
+    model_name: str = 'gemma-2-9b',
+    layer: Union[int, str] = 20,
+    hook_name: Optional[str] = None,
+) -> None:
+    """
+    Sweep class-imbalance settings across datasets and methods for a single layer.
+
+    Args:
+        model_name: Which model's activations to consume.
+        layer: Residual layer or embedding hook to evaluate.
+        hook_name: Optional full hook name to override ``layer``.
+    """
     assert layer in get_layers(model_name)
     shuffled_datasets = get_datasets().copy()
     np.random.shuffle(shuffled_datasets)
@@ -181,10 +331,17 @@ def run_all_baseline_class_imbalance(model_name = 'gemma-2-9b', layer = 20):
     for method_name in methods.keys():
         for frac in fracs:
             for dataset in shuffled_datasets:
-                val = run_baseline_class_imbalance(frac, dataset, method_name, model_name = model_name,layer = layer)
+                val = run_baseline_class_imbalance(
+                    frac,
+                    dataset,
+                    method_name,
+                    model_name = model_name,
+                    layer = layer,
+                    hook_name=hook_name,
+                )
 
-def coalesce_all_imbalance(model_name = 'gemma-2-9b', layer = 20):
-    # takes individual csvs and makes it into one big csv
+def coalesce_all_imbalance(model_name: str = 'gemma-2-9b', layer: Union[int, str] = 20) -> None:
+    """Concatenate per-run class-imbalance CSVs into dataset-level and summary outputs."""
     all_results = []
     # Create directories if they don't exist
     dataset_path = f'data/baseline_results_{model_name}/imbalance/by_dataset'
@@ -224,7 +381,30 @@ FUNCTIONS FOR CORRUPT CONDITIONS
 '''
 
 
-def run_baseline_corrupt(corrupt_frac, numbered_dataset, method_name, model_name = 'gemma-2-9b',layer = 20):
+def run_baseline_corrupt(
+    corrupt_frac: float,
+    numbered_dataset: str,
+    method_name: str,
+    model_name: str = 'gemma-2-9b',
+    layer: Union[int, str] = 20,
+    hook_name: Optional[str] = None,
+) -> Optional[bool]:
+    """
+    Train a baseline probe where a fraction of training labels are flipped to
+    simulate annotation noise.
+
+    Args:
+        corrupt_frac: Fraction of training labels to flip (0 to 0.5).
+        numbered_dataset: Dataset identifier in the ``{id}_{name}`` format.
+        method_name: Key from the ``methods`` mapping.
+        model_name: Which model's activations to consume.
+        layer: Residual layer or embedding hook to evaluate.
+        hook_name: Optional full hook name to override ``layer``.
+
+    Returns:
+        ``True`` if a run executed and saved, ``None`` when skipped because the
+        CSV already exists.
+    """
     assert 0<=corrupt_frac<=0.5
     corrupt_frac = round(corrupt_frac * 20) / 20
     savepath = f'data/baseline_results_{model_name}/corrupt/allruns/layer{layer}_{numbered_dataset}_{method_name}_corrupt{corrupt_frac}.csv'
@@ -233,7 +413,13 @@ def run_baseline_corrupt(corrupt_frac, numbered_dataset, method_name, model_name
         return None
     size = dataset_sizes[numbered_dataset]
     num_train = min(size-100, 1024)
-    X_train, y_train, X_test, y_test = get_xy_traintest(num_train, numbered_dataset, layer,  model_name = model_name)
+    X_train, y_train, X_test, y_test = get_xy_traintest(
+        num_train,
+        numbered_dataset,
+        layer,
+        model_name = model_name,
+        hook_name=hook_name,
+    )
     y_train = corrupt_ytrain(y_train, corrupt_frac)
     # Run method and get metrics
     method = methods[method_name]
@@ -245,7 +431,20 @@ def run_baseline_corrupt(corrupt_frac, numbered_dataset, method_name, model_name
     pd.DataFrame([row]).to_csv(savepath, index=False)
     return True
 
-def run_all_baseline_corrupt(model_name = 'gemma-2-9b', layer = 20):
+def run_all_baseline_corrupt(
+    model_name: str = 'gemma-2-9b',
+    layer: Union[int, str] = 20,
+    hook_name: Optional[str] = None,
+) -> None:
+    """
+    Sweep corruption levels for a single layer using logistic regression (l2)
+    while leaving existing runs untouched.
+
+    Args:
+        model_name: Which model's activations to consume.
+        layer: Residual layer or embedding hook to evaluate.
+        hook_name: Optional full hook name to override ``layer``.
+    """
     assert layer in get_layers(model_name)
     shuffled_datasets = get_datasets().copy()
     np.random.shuffle(shuffled_datasets)
@@ -253,11 +452,18 @@ def run_all_baseline_corrupt(model_name = 'gemma-2-9b', layer = 20):
     for method_name in ['logreg']:
         for frac in fracs:
             for dataset in shuffled_datasets:
-                val = run_baseline_corrupt(frac, dataset, method_name, model_name = model_name,layer = layer)
+                val = run_baseline_corrupt(
+                    frac,
+                    dataset,
+                    method_name,
+                    model_name = model_name,
+                    layer = layer,
+                    hook_name=hook_name,
+                )
                 #print(val, method_name, frac, dataset)
 
-def coalesce_all_corrupt(model_name = 'gemma-2-9b', layer = 20):
-    # takes individual csvs and makes it into one big csv
+def coalesce_all_corrupt(model_name: str = 'gemma-2-9b', layer: Union[int, str] = 20) -> None:
+    """Concatenate per-run corruption CSVs into dataset-level and summary outputs."""
     all_results = []
     # Create directories if they don't exist
     dataset_path = f'data/baseline_results_{model_name}/corrupt/by_dataset'
@@ -295,17 +501,34 @@ def coalesce_all_corrupt(model_name = 'gemma-2-9b', layer = 20):
 FUNCTIONS FOR OOD EXPERIMENTS. This is the only regime where the SAE and baseline runs are done together
 '''
 
-def run_datasets_OOD(model_name = 'gemma-2-9b', runsae = True, layer = 20, translation = False):
-    # runs the baseline and sae probes for OOD generalization
-    # trains on normal data but tests on the OOD activations
-    # run_sae should be true to run the sae generalization experiments
-    # translation = True runs the probe on 66_living_room translated into different languages.
-    # You can likely set this to False
+def run_datasets_OOD(
+    model_name: str = 'gemma-2-9b',
+    runsae: bool = True,
+    layer: int = 20,
+    translation: bool = False,
+    hook_name: Optional[str] = None,
+) -> None:
+    """
+    Evaluate OOD generalization by training probes on normal data and testing on
+    OOD activations. Optionally includes SAE features for comparison.
+
+    Args:
+        model_name: Which model's activations to consume.
+        runsae: Whether to also evaluate the SAE-projected features.
+        layer: Residual layer index to probe.
+        hook_name: Optional full hook name to override ``layer``.
+        translation: When True, include translated variants of 66_living_room.
+    """
     datasets = get_OOD_datasets(translation = translation)
     results = []
     
     for dataset in tqdm(datasets):
-        X_train, y_train, X_test, y_test = get_OOD_traintest(dataset = dataset, model_name = model_name, layer = layer)
+        X_train, y_train, X_test, y_test = get_OOD_traintest(
+            dataset = dataset,
+            model_name = model_name,
+            layer = layer,
+            hook_name=hook_name,
+        )
         metrics = find_best_reg(
                 X_train=X_train, 
                 y_train=y_train, 
@@ -334,12 +557,12 @@ def run_datasets_OOD(model_name = 'gemma-2-9b', runsae = True, layer = 20, trans
     results_df = pd.DataFrame(results)
     results_df.to_csv(f'results/baseline_probes_{model_name}/ood/all_results.csv', index=False)
 
-def run_glue():
-    # this function is used to do the GLUE CoLA investigation Section 4.3.1
-    # all three runs train on normal GLUE CoLA dataset
-    # run 0 tests on the original target labels (dirty)
-    # run 1 tests on ensembled, clean labels from a council of LLMs
-    # run 2 tests only on the examples where clean labels disagree with the original labels
+def run_glue() -> None:
+    """
+    Reproduce the GLUE CoLA investigation (Section 4.3.1) by training on the
+    normal dataset and evaluating three test label variants: original, ensemble
+    labels, and disagreement-only examples.
+    """
     results = []
     for run in range(3):
         toget = 'original_target' if run == 0 else 'ensemble'
@@ -390,8 +613,11 @@ def run_glue():
     results_df.to_csv('results/investigate/87_glue_cola_investigate_probes.csv', index=False)
 
 
-def latent_performance(dataset = '66_living-room'):
-    # calculates the single latent performance as a k=1 classifier for the top 8 latents by mean difference
+def latent_performance(dataset: str = '66_living-room') -> None:
+    """
+    Compute OOD performance of individual SAE latents by ranking features via
+    class-mean difference and training a k=1 classifier on the top latents.
+    """
     results = []
     X_train, y_train, X_test, y_test, top_by_average_diff = get_xy_OOD_sae(dataset, k = 8, model_name = 'gemma-2-9b', layer = 20, return_indices = True, num_train = 1500)
     print(top_by_average_diff)
@@ -436,11 +662,11 @@ def latent_performance(dataset = '66_living-room'):
     # finds the performance of the top 1 latent for a given dataset
 #run_datasets_OOD()
 
-def ood_pruning(dataset = '66_living-room'):
-    # does OOD Pruning  
-    # We use o1 to rank the latents by usefulness to the task via auto-interp explanations,
-    # and prune the least helpful latents to see if that helps performance
-    # section 
+def ood_pruning(dataset: str = '66_living-room') -> None:
+    """
+    Evaluate how pruning latents ranked by external interpretability scores
+    (LLM or human) affects OOD performance.
+    """
     fname = f'results/sae_probes_gemma-2-9b/OOD/OOD_latents/{dataset}/{dataset}_latent_aucs.csv'
     df = pd.read_csv(fname)
     
@@ -489,10 +715,11 @@ def ood_pruning(dataset = '66_living-room'):
     results_df = pd.DataFrame(results)
     results_df.to_csv(f'results/sae_probes_gemma-2-9b/OOD/OOD_latents/{dataset}/{dataset}_pruned.csv', index=False)
 
-def examine_glue_classifier():
-    # finds the prompts where baseline classifier most disagrees with
-    # the given label. This allows us to see if baselines are able
-    # to find incorrect labels as well. Table 7
+def examine_glue_classifier() -> None:
+    """
+    Print the GLUE-CoLA prompts where a baseline classifier is most confidently
+    wrong relative to the original labels, to support the inspection in Table 7.
+    """
     X_train, y_train, X_test, y_test_og = get_glue_traintest(toget = 'original_target')
     _, _, _, y_test_ens = get_glue_traintest(toget = 'ensemble')
     _, classifier = find_best_reg(

@@ -1,3 +1,10 @@
+"""
+Summaries and plots for multi-token probing experiments.
+
+This script collates consolidated probe outputs (baseline concat, SAE pooled,
+and attention-like probes) into LaTeX/HTML tables and comparison plots, then
+prints win-rate statistics used in the appendix.
+"""
 # %%
 import torch
 from utils_data import get_numbered_binary_tags, get_dataset_sizes, get_yvals, get_train_test_indices
@@ -43,6 +50,15 @@ import glob
 
 # Create data for DataFrame
 data = []
+sae_labels = set()
+label_to_sae_id = {}
+
+def format_sae_label(sae_id_value):
+    if isinstance(sae_id_value, str) and "average_l0_" in sae_id_value:
+        l0_val = sae_id_value.split("average_l0_")[-1].split("/")[0]
+        return f"l0={l0_val}"
+    return str(sae_id_value)
+
 for dataset in datasets:
     row = {'Dataset': dataset}
     
@@ -52,62 +68,79 @@ for dataset in datasets:
     row['Baseline (last)'] = baseline_row["test_auc"].iloc[0] if not baseline_row.empty else None
     row['Baseline (last) val'] = baseline_row["val_auc"].iloc[0] if not baseline_row.empty else None
 
-    # Get SAE original AUC from CSV for both l0 values
-    for l0 in [68, 408]:
-        sae_id = f"layer_20/width_16k/average_l0_{l0}"
-        sae_row = sae_csv[(sae_csv["dataset"] == dataset) & 
-                          (sae_csv["k"] == k) & 
-                          (sae_csv["sae_id"] == sae_id)]
-        row[f'SAE (last) l0={l0}'] = sae_row["test_auc"].iloc[0] if not sae_row.empty else None
-        row[f'SAE (last) l0={l0} val'] = sae_row["val_auc"].iloc[0] if not sae_row.empty else None
     # Load consolidated probing results from pickle files if they exist
     consolidated_files = glob.glob(f"data/consolidated_probing_{model_name}/{dataset}_{layer}_*.pkl")
     for file in consolidated_files:
         with open(file, "rb") as f:
             metrics = pkl.load(f)
             
-        if "width16k_l0" in file:
-            # Extract l0 value from filename
-            l0_val = int(file.split("l0")[-1].split("_")[0])
-            if (file.endswith("_mean_binarized.pkl") and binarize) or (file.endswith("_mean.pkl") and not binarize):
-                row[f'SAE (mean) l0={l0_val}'] = metrics["test_auc"]
-                row[f'SAE (mean) l0={l0_val} val'] = metrics["val_auc"]
-            elif (file.endswith("_max_binarized.pkl") and binarize) or (file.endswith("_max.pkl") and not binarize):
-                row[f'SAE (max) l0={l0_val}'] = metrics["test_auc"]
-                row[f'SAE (max) l0={l0_val} val'] = metrics["val_auc"]
-        elif "baseline_255_20" in file:
+        if "baseline_255_20" in file:
             row['Baseline (concat)'] = metrics["test_auc"]
             row['Baseline (concat) val'] = metrics["val_auc"]
         elif "attn_probing" in file:
             row['Attention-Like Probe'] = metrics["test_auc"]
             row['Attention-Like Probe val'] = metrics["val_auc"]
+        else:
+            sae_id_value = metrics.get("sae_id")
+            sae_label = format_sae_label(sae_id_value)
+            sae_labels.add(sae_label)
+            if sae_id_value:
+                label_to_sae_id[sae_label] = sae_id_value
+            if (file.endswith("_mean_binarized.pkl") and binarize) or (file.endswith("_mean.pkl") and not binarize):
+                row[f'SAE (mean) {sae_label}'] = metrics["test_auc"]
+                row[f'SAE (mean) {sae_label} val'] = metrics["val_auc"]
+            elif (file.endswith("_max_binarized.pkl") and binarize) or (file.endswith("_max.pkl") and not binarize):
+                row[f'SAE (max) {sae_label}'] = metrics["test_auc"]
+                row[f'SAE (max) {sae_label} val'] = metrics["val_auc"]
     data.append(row)
 
 # Create DataFrame
 df = pd.DataFrame(data)
 
+# Populate SAE (last) results for any discovered SAE ids
+for label in sorted(sae_labels):
+    sae_id_value = label_to_sae_id.get(label)
+    if sae_id_value is None:
+        continue
+    sae_rows = sae_csv[(sae_csv["k"] == k) & (sae_csv["sae_id"] == sae_id_value)]
+    for _, sae_row in sae_rows.iterrows():
+        dataset = sae_row["dataset"]
+        df.loc[df["Dataset"] == dataset, f"SAE (last) {label}"] = sae_row["test_auc"]
+        df.loc[df["Dataset"] == dataset, f"SAE (last) {label} val"] = sae_row["val_auc"]
+
 # Drop rows where we only have baseline and SAE (last) results
-df = df.dropna(subset=['SAE (mean) l0=68', 'SAE (max) l0=68', 'SAE (mean) l0=408', 
-                      'SAE (max) l0=408', 'Baseline (concat)', 'Attention-Like Probe'], how='all')
+sae_agg_cols = [f"SAE (mean) {label}" for label in sae_labels] + [f"SAE (max) {label}" for label in sae_labels]
+drop_subset = sae_agg_cols + ['Baseline (concat)', 'Attention-Like Probe']
+df = df.dropna(subset=drop_subset, how='all')
 
 # %%
 # Create LaTeX table
-print("\\begin{tabular}{l" + "c"*10 + "}")
+sae_labels_sorted = sorted(sae_labels)
+sae_headers = []
+for label in sae_labels_sorted:
+    sae_headers.extend([
+        f"SAE (last) {label}",
+        f"SAE (mean) {label}",
+        f"SAE (max) {label}",
+    ])
+header_cols = ["Dataset", "Baseline (last)", "Baseline (concat)"] + sae_headers + ["Attention-Like Probe"]
+num_value_cols = len(header_cols) - 1
+print("\\begin{tabular}{l" + "c"*num_value_cols + "}")
 print("\\toprule")
-print("Dataset & Baseline (last) & Baseline (concat) & SAE (last) l0=68 & SAE (mean) l0=68 & SAE (max) l0=68 & SAE (last) l0=408 & SAE (mean) l0=408 & SAE (max) l0=408 & Attention\\-Like Probe \\\\")
+print(" & ".join(header_cols).replace("_", "\\_") + " \\\\")
 print("\\midrule")
 
 for _, row in df.iterrows():
-    values = [row['Baseline (last)'], row['Baseline (concat)'], 
-             row['SAE (last) l0=68'], row['SAE (mean) l0=68'], row['SAE (max) l0=68'],
-             row['SAE (last) l0=408'], row['SAE (mean) l0=408'], row['SAE (max) l0=408'],
-             row['Attention-Like Probe']]
-    max_val = max(values)
+    values = [row.get(col) for col in header_cols[1:]]
+    numeric_values = [v for v in values if v is not None]
+    max_val = max(numeric_values) if numeric_values else None
     
     # Format each value, making max bold with dollar signs
     formatted = []
     for v in values:
-        if v == max_val:
+        if v is None:
+            formatted.append("NA")
+        elif max_val is not None and v == max_val:
             formatted.append(f"$\\textbf{{{v:.3f}}}$")
         else:
             formatted.append(f"{v:.3f}")
@@ -128,7 +161,7 @@ print("\\end{tabular}")
 html_table = "<table style='border-collapse: collapse; text-align: center'>\n"
 
 # Add header row
-cols = ['Dataset', 'Baseline (last)', 'Baseline (concat)', 'SAE (last) l0=68', 'SAE (mean) l0=68', 'SAE (max) l0=68', 'SAE (last) l0=408', 'SAE (mean) l0=408', 'SAE (max) l0=408', 'Attention-Like Probe']
+cols = header_cols
 html_table += "<tr>"
 for col in cols:
     html_table += f"<th style='padding: 8px; border: 1px solid'>{col}</th>"
@@ -137,14 +170,18 @@ html_table += "</tr>\n"
 # Add data rows
 for _, row in df.iterrows():
     values = [row[col] for col in cols[1:]]  # Skip 'Dataset' column for values
-    max_val = max(values)
+    numeric_values = [v for v in values if v is not None]
+    max_val = max(numeric_values) if numeric_values else None
     
     html_table += "<tr>"
     html_table += f"<td style='padding: 8px; border: 1px solid'>{row['Dataset']}</td>"
     
     for v in values:
         style = "padding: 8px; border: 1px solid"
-        if abs(v - max_val) <= 0.005:
+        if v is None:
+            html_table += f"<td style='{style}'>NA</td>"
+            continue
+        if max_val is not None and abs(v - max_val) <= 0.005:
             style += "; font-weight: bold; color: #0066cc"
         html_table += f"<td style='{style}'>{v:.3f}</td>"
     
@@ -176,8 +213,13 @@ margin_of_error = 0.005
 # Calculate percentages
 baseline_last = df['Baseline (last)']
 baseline_attn = df['Attention-Like Probe']
-sae_408_last = df['SAE (last) l0=408'] 
-sae_408_max = df['SAE (max) l0=408']
+primary_label = "l0=408" if "l0=408" in sae_labels else (sorted(sae_labels)[0] if sae_labels else None)
+if primary_label is None:
+    raise ValueError("No SAE aggregated results found; cannot compute comparison statistics.")
+sae_last_col = f"SAE (last) {primary_label}"
+sae_max_col = f"SAE (max) {primary_label}"
+sae_408_last = df[sae_last_col]
+sae_408_max = df[sae_max_col]
 
 # % where baseline last > SAE 408 last (with margin)
 pct_baseline_beats_sae_last = ((baseline_last - sae_408_last) > margin_of_error).mean() * 100
@@ -207,28 +249,32 @@ percent_sae_max_beats_baseline_attn = ((sae_408_max - baseline_attn) > margin_of
 percent_sae_max_beats_baseline_last = ((sae_408_max - baseline_last) > margin_of_error).mean() * 100
 percent_baseline_last_beats_sae_max = ((baseline_last - sae_408_max) > margin_of_error).mean() * 100
 
-print(f"Percentage where Baseline (last) > SAE l0=408 (last) by {margin_of_error}: {pct_baseline_beats_sae_last:.1f}%")
-print(f"Percentage where SAE l0=408 (last) > Baseline (last) by {margin_of_error}: {pct_sae_last_beats_baseline:.1f}%")
-print(f"Percentage where Baseline (last) > both SAE l0=408 (last) and (max) by {margin_of_error}: {pct_baseline_beats_both:.1f}%")
-print(f"Percentage where SAE l0=408 (max) or SAE l0=408 (last) > Baseline (last) by {margin_of_error}: {pct_sae_max_or_sae_last_beats_baseline:.1f}%")
-print(f"Percentage where Baseline (last) or Baseline (attn) > SAE l0=408 (last) and (max) by {margin_of_error}: {pct_baseline_last_or_baseline_attn_beats_sae_last_and_max:.1f}%")
-print(f"Percentage where SAE l0=408 (last) or SAE l0=408 (max) > Baseline (last) and (attn) by {margin_of_error}: {pct_sae_last_or_sae_max_beats_baseline_last_and_baseline_attn:.1f}%")
-print(f"Percentage where Baseline (attn) > SAE l0=408 (max) by {margin_of_error}: {percent_baseline_attn_beats_sae_max:.1f}%")
-print(f"Percentage where SAE l0=408 (max) > Baseline (attn) by {margin_of_error}: {percent_sae_max_beats_baseline_attn:.1f}%")
-print(f"Percentage where Baseline (last) > SAE l0=408 (max) by {margin_of_error}: {percent_baseline_last_beats_sae_max:.1f}%")
-print(f"Percentage where SAE l0=408 (max) > Baseline (last) by {margin_of_error}: {percent_sae_max_beats_baseline_last:.1f}%")
+print(f"Percentage where Baseline (last) > SAE {primary_label} (last) by {margin_of_error}: {pct_baseline_beats_sae_last:.1f}%")
+print(f"Percentage where SAE {primary_label} (last) > Baseline (last) by {margin_of_error}: {pct_sae_last_beats_baseline:.1f}%")
+print(f"Percentage where Baseline (last) > both SAE {primary_label} (last) and (max) by {margin_of_error}: {pct_baseline_beats_both:.1f}%")
+print(f"Percentage where SAE {primary_label} (max) or SAE {primary_label} (last) > Baseline (last) by {margin_of_error}: {pct_sae_max_or_sae_last_beats_baseline:.1f}%")
+print(f"Percentage where Baseline (last) or Baseline (attn) > SAE {primary_label} (last) and (max) by {margin_of_error}: {pct_baseline_last_or_baseline_attn_beats_sae_last_and_max:.1f}%")
+print(f"Percentage where SAE {primary_label} (last) or SAE {primary_label} (max) > Baseline (last) and (attn) by {margin_of_error}: {pct_sae_last_or_sae_max_beats_baseline_last_and_baseline_attn:.1f}%")
+print(f"Percentage where Baseline (attn) > SAE {primary_label} (max) by {margin_of_error}: {percent_baseline_attn_beats_sae_max:.1f}%")
+print(f"Percentage where SAE {primary_label} (max) > Baseline (attn) by {margin_of_error}: {percent_sae_max_beats_baseline_attn:.1f}%")
+print(f"Percentage where Baseline (last) > SAE {primary_label} (max) by {margin_of_error}: {percent_baseline_last_beats_sae_max:.1f}%")
+print(f"Percentage where SAE {primary_label} (max) > Baseline (last) by {margin_of_error}: {percent_sae_max_beats_baseline_last:.1f}%")
 
 # %%
 
 def get_test_aucs_using_quiver(df, methods):
-    """Get test AUCs by selecting best method per dataset based on validation AUC.
-    
+    """
+    Select the best validation AUC per dataset and return the corresponding
+    test AUCs along with summary statistics.
+
     Args:
-        df: DataFrame containing validation and test AUCs for different methods
-        methods: List of method names to compare
-        
+        df: DataFrame containing validation and test AUCs for different methods.
+        methods: List of method names to compare (used to find "best" per dataset).
+
     Returns:
-        Dictionary mapping dataset names to their best test AUCs and mean/std
+        Tuple of (best_test_aucs, mean, sem) where best_test_aucs maps dataset to
+        its selected test AUC, mean is the average across datasets, and sem is
+        the standard error of that mean.
     """
     best_test_aucs = {}
     
@@ -263,7 +309,8 @@ baseline_methods = ["Baseline (last)", "Attention-Like Probe"]
 best_baseline_aucs = get_test_aucs_using_quiver(df, baseline_methods)[0]
 df["best_baseline_test_auc"] = df.apply(lambda row: best_baseline_aucs[row["Dataset"]], axis=1)
 
-best_sae_test_aucs = get_test_aucs_using_quiver(df, ["SAE (last) l0=408", "SAE (max) l0=408"])[0]
+best_sae_methods = [sae_last_col, sae_max_col]
+best_sae_test_aucs = get_test_aucs_using_quiver(df, best_sae_methods)[0]
 df["best_sae_test_auc"] = df.apply(lambda row: best_sae_test_aucs[row["Dataset"]], axis=1)
 # %%
 
@@ -281,6 +328,18 @@ def plot_comparison_bars(fontsize=6, bar_font_size=6,
                             sae_color="blue",
                             baseline_color="green",
                             bar_alpha=0.7):
+    """
+    Render side-by-side bar charts comparing baseline and SAE win rates and
+    write the resulting PDF to ``plots/``.
+
+    Args:
+        fontsize: Base font size for titles and labels.
+        bar_font_size: Font size for bar annotations.
+        titles: Plot titles for each of the three subplots.
+        sae_color: Bar color for SAE wins.
+        baseline_color: Bar color for baseline wins.
+        bar_alpha: Bar transparency.
+    """
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(3.25, 1.75), sharey=True)
 
     # Plot 1: Baseline vs SAE Last

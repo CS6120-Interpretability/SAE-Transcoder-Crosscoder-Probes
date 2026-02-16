@@ -1,9 +1,9 @@
 import torch
-import numpy as np
 import pickle as pkl
 from utils_data import get_OOD_datasets, get_dataset_sizes, get_numbered_binary_tags, get_training_sizes
 from utils_data import corrupt_ytrain, get_corrupt_frac, get_class_imbalance
-from utils_sae import get_sae_layers_extra, layer_to_sae_ids, get_sae_layers
+from utils_sae import build_sae_description
+from legacy_sae import get_sae_layers_extra, layer_to_sae_ids, get_sae_layers
 from tqdm import tqdm
 from utils_training import find_best_reg
 import os
@@ -11,6 +11,7 @@ import warnings
 from sklearn.exceptions import ConvergenceWarning
 import random
 import argparse
+from typing import List, Optional
 
 warnings.simplefilter("ignore", category=ConvergenceWarning)
 torch.set_grad_enabled(False)
@@ -27,19 +28,7 @@ def load_activations(path):
 
 # Normal setting functions
 def get_sae_paths(dataset, layer, sae_id, reg_type, binarize=False, model_name="gemma-2-9b", setting="normal", extra_string="_"):
-    if model_name == "gemma-2-9b":
-        width = sae_id.split("/")[1]
-        l0 = sae_id.split("/")[2]
-        description_string = f"{dataset}_{layer}_{width}_{l0}"
-    elif model_name == "llama-3.1-8b":
-        description_string = f"{dataset}_{sae_id}"
-    elif model_name == "gemma-2-2b":
-        name = '_'.join(sae_id[2].split('/')[0].split('_')[1:])
-        l0 = sae_id[3]
-        rounded_l0 = round(float(l0))
-        description_string = f"{dataset}_{name}_{rounded_l0}"
-    else:
-        raise ValueError(f"Invalid model name: {model_name}")
+    description_string = build_sae_description(dataset, sae_id, layer)
     
     if binarize:
         reg_type += "_binarized"
@@ -214,10 +203,21 @@ def run_baseline(dataset, layer, sae_id, reg_type, setting, model_name="gemma-2-
     
     return True
 
-def run_baselines(reg_type, model_name, setting, binarize=False, target_sae_id=None, randomize_order=False):
-    layers = get_sae_layers(model_name)
-    if model_name == "gemma-2-9b" and setting == "normal":
-        layers = get_sae_layers_extra(model_name)
+def run_baselines(
+    reg_type,
+    model_name,
+    setting,
+    binarize=False,
+    target_sae_id=None,
+    randomize_order=False,
+    layers_override: Optional[List[int]] = None,
+):
+    if layers_override is not None:
+        layers = layers_override
+    else:
+        layers = get_sae_layers(model_name)
+        if model_name == "gemma-2-9b" and setting == "normal":
+            layers = get_sae_layers_extra(model_name)
     while True:
         found_missing = False
         if setting == "OOD":
@@ -306,7 +306,6 @@ if __name__ == "__main__":
                         choices=["normal", "scarcity", "label_noise", "class_imbalance", "OOD"], 
                         help="Probe training setting (normal, scarcity, label_noise, or imbalance)")
     parser.add_argument("--model_name", type=str, required=True, 
-                        choices=["gemma-2-9b", "llama-3.1-8b", "gemma-2-2b"], 
                         help="Model name")
     parser.add_argument("--binarize", action="store_true", 
                         help="Whether to binarize activations")
@@ -314,7 +313,17 @@ if __name__ == "__main__":
                         help="Target specific SAE ID (optional)")
     parser.add_argument("--randomize_order", action="store_true", 
                         help="Randomize order of datasets and layers")
+    parser.add_argument("--layers", type=int, nargs="+", default=None,
+                        help="Override layer list when using custom models")
     
     args = parser.parse_args()
     
-    run_baselines(args.reg_type, args.model_name, args.setting, args.binarize, args.target_sae_id, args.randomize_order)
+    run_baselines(
+        args.reg_type,
+        args.model_name,
+        args.setting,
+        args.binarize,
+        args.target_sae_id,
+        args.randomize_order,
+        layers_override=args.layers,
+    )

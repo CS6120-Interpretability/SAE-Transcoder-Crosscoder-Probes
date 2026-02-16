@@ -1,9 +1,23 @@
+"""
+Utilities for multi-token probing experiments.
+
+This script supports three probe families:
+1) PCA-concatenated baseline probes over token positions.
+2) SAE-aggregated probes (mean/max pooling over sequence).
+3) A learned attention pooling probe.
+
+Artifacts are written into ``data/consolidated_probing_{model_name}`` so runs can
+be resumed safely.
+"""
 # %%
 import os
 os.environ["OMP_NUM_THREADS"] = "10"
 
+from typing import Dict, Optional
+
 import torch
 from utils_data import get_numbered_binary_tags, get_dataset_sizes, get_yvals, get_train_test_indices
+from utils_sae import build_sae_description
 import os
 from tqdm import tqdm
 import pandas as pd
@@ -12,31 +26,53 @@ import pickle as pkl
 import warnings
 from sklearn.exceptions import ConvergenceWarning
 import numpy as np
-import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 import argparse
-from sklearn.metrics import roc_auc_score, accuracy_score
+from sklearn.metrics import roc_auc_score
 import einops
-import argparse
 
 warnings.simplefilter("ignore", category=ConvergenceWarning)
 
 data_dir = "data"
-model_name = "gemma-2-9b" 
+model_name = "gemma-2-9b"
 max_seq_len = 256
 layer = 20
 k = 128
 device = "cuda:0"
+hook_name = None
 
 # Default SAE ID parameters
 parser = argparse.ArgumentParser()
 parser.add_argument("--l0", type=int, default=68, help="L0 value for the SAE", choices=[408, 68])
 parser.add_argument("--to_run_list", type=str, nargs="+", default=[], choices=["baseline_attn", "sae_aggregated", "attn_probing"])
+parser.add_argument("--model_name", type=str, default=model_name)
+parser.add_argument("--max_seq_len", type=int, default=max_seq_len)
+parser.add_argument("--layer", type=int, default=layer)
+parser.add_argument("--k", type=int, default=k)
+parser.add_argument("--device", type=str, default=device)
+parser.add_argument("--data_dir", type=str, default=data_dir)
+parser.add_argument("--hook_name", type=str, default=None, help="Explicit hook name for model activations.")
+parser.add_argument("--sae_id", type=str, default=None, help="Explicit SAE id used in file names.")
 args = parser.parse_args()
+
+# Apply overrides
+data_dir = args.data_dir
+model_name = args.model_name
+max_seq_len = args.max_seq_len
+layer = args.layer
+k = args.k
+device = args.device
+hook_name = args.hook_name
 
 # Set SAE ID based on arguments
 l0 = args.l0
-sae_id =  f"layer_20/width_16k/average_l0_{l0}"
+sae_id = args.sae_id or f"layer_{layer}/width_16k/average_l0_{l0}"
+use_legacy_consolidated = (
+    args.sae_id is None
+    and model_name == "gemma-2-9b"
+    and "width_16k" in sae_id
+    and "average_l0" in sae_id
+)
 
 
 baseline_csv = pd.read_csv(f"results/baseline_probes_{model_name}/normal_settings/layer{layer}_results.csv")
@@ -49,20 +85,37 @@ to_run_list = args.to_run_list
 # %%
 
 
-def load_model_acts(dataset):
-    """Load the original model activations for a dataset"""
-    hook_name = f"blocks.{layer}.hook_resid_post"
-    file_path = f"{data_dir}/model_activations_{model_name}_{max_seq_len}/{dataset}_{hook_name}.pt"
+def load_model_acts(dataset: str) -> torch.Tensor:
+    """
+    Load the cached residual-stream activations for a dataset.
+
+    Args:
+        dataset: Dataset identifier in ``{id}_{name}`` format.
+
+    Returns:
+        Tensor of shape [num_examples, seq_len, hidden_dim].
+    """
+    local_hook_name = hook_name or f"blocks.{layer}.hook_resid_post"
+    file_path = f"{data_dir}/model_activations_{model_name}_{max_seq_len}/{dataset}_{local_hook_name}.pt"
     return torch.load(file_path, weights_only=True)
 
-def load_sae_acts(dataset, sae_id):
-    """Load the SAE-encoded activations for a dataset"""
-    width = sae_id.split("/")[1]
-    l0 = sae_id.split("/")[2]
-    train_path = f"{data_dir}/sae_activations_{model_name}_{max_seq_len}/{dataset}_{layer}_{width}_{l0}_X_train_sae.pt"
-    test_path = f"{data_dir}/sae_activations_{model_name}_{max_seq_len}/{dataset}_{layer}_{width}_{l0}_X_test_sae.pt"
-    y_train_path = f"{data_dir}/sae_activations_{model_name}_{max_seq_len}/{dataset}_{layer}_{width}_{l0}_y_train.pt"
-    y_test_path = f"{data_dir}/sae_activations_{model_name}_{max_seq_len}/{dataset}_{layer}_{width}_{l0}_y_test.pt"
+def load_sae_acts(dataset: str, sae_id: str) -> Dict[str, torch.Tensor]:
+    """
+    Load SAE-encoded activations and labels for a dataset.
+
+    Args:
+        dataset: Dataset identifier in ``{id}_{name}`` format.
+        sae_id: SAE identifier used to build the activation filenames.
+
+    Returns:
+        Dict with dense tensors for ``X_train``, ``X_test``, ``y_train``,
+        and ``y_test``.
+    """
+    description_string = build_sae_description(dataset, sae_id, layer)
+    train_path = f"{data_dir}/sae_activations_{model_name}_{max_seq_len}/{description_string}_X_train_sae.pt"
+    test_path = f"{data_dir}/sae_activations_{model_name}_{max_seq_len}/{description_string}_X_test_sae.pt"
+    y_train_path = f"{data_dir}/sae_activations_{model_name}_{max_seq_len}/{description_string}_y_train.pt"
+    y_test_path = f"{data_dir}/sae_activations_{model_name}_{max_seq_len}/{description_string}_y_test.pt"
     
     return {
         "X_train": torch.load(train_path, weights_only=True).to_dense(),
@@ -71,8 +124,28 @@ def load_sae_acts(dataset, sae_id):
         "y_test": torch.load(y_test_path, weights_only=True).to_dense()
     }
 
-def train_concat_baseline_on_model_acts(X_train, X_test, y_train, y_test, number_to_concat=255, pca_k=20):
-    """Train baseline probe on original model activations"""
+def train_concat_baseline_on_model_acts(
+    X_train: torch.Tensor,
+    X_test: torch.Tensor,
+    y_train: np.ndarray,
+    y_test: np.ndarray,
+    number_to_concat: int = 255,
+    pca_k: int = 20,
+) -> Dict[str, float]:
+    """
+    Train a baseline probe by concatenating PCA-projected token features.
+
+    Args:
+        X_train: Training activations [num_examples, seq_len, hidden_dim].
+        X_test: Test activations [num_examples, seq_len, hidden_dim].
+        y_train: Training labels.
+        y_test: Test labels.
+        number_to_concat: Max token positions to include (starting at position 1).
+        pca_k: Number of PCA components per token position.
+
+    Returns:
+        Metrics dictionary from ``find_best_reg``.
+    """
     # Get sequence length and feature dimension
     seq_len = X_train.shape[1]
     
@@ -154,8 +227,30 @@ def largest_nonzero_col_per_row(A: torch.Tensor, sentinel: int = -1) -> torch.Te
 
 
 
-def train_aggregated_probe_on_acts(X_train, X_test, y_train, y_test, aggregation_method, k=None, binarize=False):
-    """Train probe on aggregated activations"""
+def train_aggregated_probe_on_acts(
+    X_train: torch.Tensor,
+    X_test: torch.Tensor,
+    y_train: np.ndarray,
+    y_test: np.ndarray,
+    aggregation_method: str,
+    k: Optional[int] = None,
+    binarize: bool = False,
+) -> Dict[str, float]:
+    """
+    Train a probe after aggregating token activations (mean or max pooling).
+
+    Args:
+        X_train: Training activations [num_examples, seq_len, hidden_dim].
+        X_test: Test activations [num_examples, seq_len, hidden_dim].
+        y_train: Training labels.
+        y_test: Test labels.
+        aggregation_method: ``"mean"`` or ``"max"`` pooling over tokens.
+        k: Optional top-k feature selector by class-mean difference.
+        binarize: When True, binarize aggregated activations at threshold 1.
+
+    Returns:
+        Metrics dictionary from ``find_best_reg``.
+    """
 
     
     train_sums = X_train.sum(dim=-1)
@@ -220,10 +315,30 @@ def train_aggregated_probe_on_acts(X_train, X_test, y_train, y_test, aggregation
 
 os.makedirs(f"data/consolidated_probing_{model_name}", exist_ok=True)
 
-def run_sae_aggregated_probing(dataset, layer, sae_id, k, binarize=False):
+def run_sae_aggregated_probing(
+    dataset: str,
+    layer: int,
+    sae_id: str,
+    k: int,
+    binarize: bool = False,
+) -> None:
+    """
+    Run mean/max pooled SAE probes for one dataset and persist metrics.
+
+    Args:
+        dataset: Dataset identifier in ``{id}_{name}`` format.
+        layer: Layer index used to select cached activations.
+        sae_id: SAE identifier used for cached files.
+        k: Number of SAE features to keep after ranking by class-mean difference.
+        binarize: Whether to binarize pooled activations before probing.
+    """
+    if use_legacy_consolidated:
+        stem = f"{dataset}_{layer}_width16k_l0{l0}"
+    else:
+        stem = build_sae_description(dataset, sae_id, layer)
     save_paths = [
-        f"data/consolidated_probing_{model_name}/{dataset}_{layer}_width16k_l0{l0}_mean{'_binarized' if binarize else ''}.pkl",
-        f"data/consolidated_probing_{model_name}/{dataset}_{layer}_width16k_l0{l0}_max{'_binarized' if binarize else ''}.pkl"
+        f"data/consolidated_probing_{model_name}/{stem}_mean{'_binarized' if binarize else ''}.pkl",
+        f"data/consolidated_probing_{model_name}/{stem}_max{'_binarized' if binarize else ''}.pkl"
     ]
     all_exist = all(os.path.exists(save_path) for save_path in save_paths)
     if all_exist:
@@ -266,7 +381,23 @@ if "sae" in to_run_list:
 # %%
 
 
-def run_baseline_concat_probing(dataset, layer, sae_id, number_to_concat=255, pca_k=20):
+def run_baseline_concat_probing(
+    dataset: str,
+    layer: int,
+    sae_id: str,
+    number_to_concat: int = 255,
+    pca_k: int = 20,
+) -> None:
+    """
+    Run the PCA-concatenated baseline probe for a dataset and cache results.
+
+    Args:
+        dataset: Dataset identifier in ``{id}_{name}`` format.
+        layer: Layer index used to select cached activations.
+        sae_id: SAE identifier used to name the output files.
+        number_to_concat: Max token positions to include.
+        pca_k: PCA dimensionality per token position.
+    """
     save_path = f"data/consolidated_probing_{model_name}/{dataset}_{layer}_baseline_{number_to_concat}_{pca_k}.pkl"
     if os.path.exists(save_path):
         return
@@ -306,8 +437,26 @@ if "baseline_attn" in to_run_list:
             continue
 
 # %%
-def train_attn_probing(X_train, X_test, y_train, y_test, l2_lambda = 0):
-    """Train a simple attention-based probe on the data with learning"""
+def train_attn_probing(
+    X_train: torch.Tensor,
+    X_test: torch.Tensor,
+    y_train: np.ndarray,
+    y_test: np.ndarray,
+    l2_lambda: float = 0,
+) -> Dict[str, object]:
+    """
+    Train a learned attention pooling probe and report AUC metrics.
+
+    Args:
+        X_train: Training activations [num_examples, seq_len, hidden_dim].
+        X_test: Test activations [num_examples, seq_len, hidden_dim].
+        y_train: Training labels.
+        y_test: Test labels.
+        l2_lambda: L2 penalty for attention and output vectors.
+
+    Returns:
+        Metrics dict including train/val/test AUCs and best learned parameters.
+    """
     # Get sequence length and feature dimension
     seq_len = X_train.shape[1]
     feat_dim = X_train.shape[2]
@@ -415,7 +564,11 @@ def train_attn_probing(X_train, X_test, y_train, y_test, l2_lambda = 0):
     }
     return metrics
 
-def train_attn_probing_on_model_acts(dataset, layer):
+def train_attn_probing_on_model_acts(dataset: str, layer: int) -> None:
+    """
+    Load model activations for a dataset, run attention probing, and persist
+    the resulting metrics.
+    """
     save_path = f"data/consolidated_probing_{model_name}/{dataset}_{layer}_attn_probing.pkl"
     if os.path.exists(save_path):
         return

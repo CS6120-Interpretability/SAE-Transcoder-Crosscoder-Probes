@@ -1,17 +1,23 @@
 # %%
 import os
-from sae_bench.sae_bench_utils import general_utils
+import json
+from collections import defaultdict
+from pathlib import Path
+from typing import List, Tuple
+
+import torch
 from sae_bench.custom_saes.run_all_evals_dictionary_learning_saes import MODEL_CONFIGS, snapshot_download
 from sae_bench.custom_saes.run_all_evals_dictionary_learning_saes import load_dictionary_learning_sae
-import torch
-from collections import defaultdict
-import json
-from pathlib import Path
+from sae_bench.sae_bench_utils import general_utils
 
 
 def get_all_hf_repo_autoencoders(
     repo_id: str, download_location: str = "downloaded_saes"
 ) -> list[str]:
+    """
+    Download SAE configs from a HuggingFace repo and return relative locations
+    for each SAE contained within the snapshot.
+    """
     download_location = os.path.join(download_location, repo_id.replace("/", "_"))
     config_dir = snapshot_download(
         repo_id,
@@ -39,7 +45,8 @@ def get_all_hf_repo_autoencoders(
     return repo_locations
 
 
-def get_gemma_2_2b_sae_ids(layer):
+def get_gemma_2_2b_sae_ids(layer: int) -> List[Tuple[str, str, str, float]]:
+    """List all Gemma-2-2B SAE identifiers discovered in the configured repos."""
     assert layer == 12
 
     repo_ids = ["canrager/saebench_gemma-2-2b_width-2pow14_date-0107", "adamkarvonen/temp"]
@@ -74,7 +81,11 @@ def get_gemma_2_2b_sae_ids(layer):
 
     return all_sae_locations
 
-def get_gemma_2_2b_sae_ids_largest_l0(layer):
+def get_gemma_2_2b_sae_ids_largest_l0(layer: int) -> List[Tuple[str, str, str]]:
+    """
+    Select one SAE per dictionary-learning run, picking the checkpoint whose L0
+    is closest to 200 to keep comparisons manageable.
+    """
     assert layer == 12
 
     all_sae_locations = get_gemma_2_2b_sae_ids(layer)
@@ -107,7 +118,8 @@ def get_gemma_2_2b_sae_ids_largest_l0(layer):
 
     return filtered_locations
 
-def load_gemma_2_2b_sae(sae_location):
+def load_gemma_2_2b_sae(sae_location: Tuple[str, str, str]):
+    """Load a Gemma-2-2B SAE from disk via sae-bench helpers."""
       
     repo_id, model_name, sae_location, l0 = sae_location
 

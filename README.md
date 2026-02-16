@@ -28,6 +28,59 @@ This repository contains code to replicate experiments from our paper [*Are Spar
    
 Note that these should all be runnable as is from the results data in the repo.
 
+### Custom Models and SAEs
+We now support arbitrary TransformerLens models and SAE Lens releases, not just the three paper models. The key idea is to keep file paths keyed off a `model_name` (path-safe string) while allowing a separate model id for loading and explicit SAE ids/releases for SAE Lens.
+
+**Model activations (any TransformerLens model):**
+```
+python generate_model_activations.py --model_name my-model-name --model_id meta-llama/Llama-3.1-8B \
+  --layers 0 10 20 --no_embed
+```
+Optional flags: `--hook_names` (full hook names), `--layers`, `--resid_hook`, `--num_default_layers`, `--no_embed`.
+
+**SAE activations (any SAE Lens release/id):**
+```
+python generate_sae_activations.py --model_name my-model-name --setting normal \
+  --sae_release <sae_release> --sae_ids <sae_id> --hook_name blocks.20.hook_resid_post
+```
+Optional flags: `--layers` (override layer list when model defaults are unknown).
+For multi-layer crosscoders, pass `--hook_names` (one per layer) and, if needed,
+`--sae_converter module:function` to use a custom loader.
+
+**SAE probe training (custom layers):**
+```
+python train_sae_probes.py --model_name my-model-name --reg_type l1 --setting normal \
+  --target_sae_id <sae_id> --layers 20
+```
+
+**Multi-token activations (custom models/SAEs):**
+```
+python generate_model_and_sae_multi_token_acts.py --model_name my-model-name --model_id meta-llama/Llama-3.1-8B \
+  --hook_name blocks.20.hook_resid_post --sae_release <sae_release> --sae_ids <sae_id>
+```
+If the SAE config exposes a hook name, you can omit `--hook_name`; otherwise pass it explicitly.
+
+**Multi-token probe training (custom hooks/SAEs):**
+```
+python run_multi_token_acts.py --model_name my-model-name --max_seq_len 256 --layer 20 \
+  --hook_name blocks.20.hook_resid_post --sae_id <sae_id> --to_run_list sae_aggregated
+```
+
+**Notes on consolidated probing filenames:**
+When `run_multi_token_acts.py` is called with an explicit `--sae_id`, the
+consolidated probing outputs use the sanitized SAE id in the filename (for
+example, `.../<dataset>_<layer>_<sae_id>_mean.pkl`). If you omit `--sae_id` and
+use the default Gemma-2-9B settings, the legacy `width16k_l0{L0}` naming is
+preserved. The plotting script (`plot_multi_token.py`) now detects either
+format and selects a primary SAE label automatically when computing summary
+statistics.
+
+**Legacy SAE helpers:**
+Model-specific SAE utilities used in the original paper runs now live in
+`legacy_sae.py`. Import from `legacy_sae.py` when you need Gemma/Llama SAE id
+lookups or pretrained release names. New code paths should prefer the generic
+helpers in `utils_sae.py` and pass explicit SAE ids/releases when needed.
+
 ### Datasets
 - **Raw Text Datasets:** Accessible via [Dropbox link](https://www.dropbox.com/scl/fo/lvajx9100jsy3h9cvis7q/AIocXXICIwHsz-HsXSekC3Y?rlkey=tq7td61h1fufm01cbdu2oqsb5&st=aorlnph5&dl=0). Note that datasets 161-163 are modified from their source. An error in our formatting reframes them as differentiating between news headlines and code samples. 
 - **Model Activations:** Also stored on Dropbox (Note: Files are large).

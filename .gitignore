@@ -6,3 +6,4 @@ data/*
 __pycache__
 downloaded_saes/*
 plots
+.venv/

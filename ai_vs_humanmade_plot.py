@@ -1,3 +1,10 @@
+"""
+Plotting utilities for the AI-vs-human last-token analysis (Section 4.3.2).
+
+This script loads model activations for the 110_aimade_humangpt3 dataset,
+projects them through a pretrained SAE, and visualizes the top latents and
+token-level frequency differences between AI and human text.
+"""
 # %%
 
 import torch
@@ -62,22 +69,26 @@ def plot_feature_analysis(sae_activations, targets, last_tokens, tokenizer,
                          fontsize=6, ylabel_fontsize=None, label_rotation_left=0, label_rotation_right=0, bar_alpha=0.7,
                          ytick_fontsize=4.5):
     """
-    Plot analysis of top features and token distributions for AI vs Human text.
-    
+    Plot analysis of top SAE features and last-token distributions for AI vs
+    human text.
+
     Args:
-        sae_activations: Tensor of SAE activations
-        targets: Tensor of binary targets (0=Human, 1=AI) 
-        last_tokens: Tensor of last tokens for each text
-        tokenizer: Tokenizer for decoding tokens
-        top_k: Number of top features to show
-        cutoff: Minimum frequency for tokens to be included
-        figsize: Figure size as (width, height)
-        fontsize: Base font size for labels
-        ylabel_fontsize: Font size for y-axis labels (defaults to fontsize if None)
-        label_rotation_left: Rotation angle for x-tick labels in left plot
-        label_rotation_right: Rotation angle for x-tick labels in right plot
-        bar_alpha: Alpha/transparency for bars
-        ytick_fontsize: Font size for y-axis numerical labels
+        sae_activations: SAE activations for each example (dense tensor).
+        targets: Binary targets (0=Human, 1=AI).
+        last_tokens: Token IDs for the final token of each prompt.
+        tokenizer: Tokenizer used to decode tokens for display.
+        top_k: Number of SAE features to display in the left panel.
+        cutoff: Minimum token frequency for inclusion in the right panel.
+        figsize: Figure size as (width, height).
+        fontsize: Base font size for labels.
+        ylabel_fontsize: Font size for y-axis labels (defaults to fontsize if None).
+        label_rotation_left: Rotation angle for x-tick labels in left plot.
+        label_rotation_right: Rotation angle for x-tick labels in right plot.
+        bar_alpha: Alpha/transparency for bars.
+        ytick_fontsize: Font size for y-axis numerical labels.
+
+    Returns:
+        Matplotlib Figure object containing the two-panel visualization.
     """
     if ylabel_fontsize is None:
         ylabel_fontsize = fontsize

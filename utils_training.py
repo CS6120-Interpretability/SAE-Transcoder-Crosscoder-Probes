@@ -1,20 +1,17 @@
-from joblib import Parallel, delayed
-import numpy as np
-from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.model_selection import LeavePOut, StratifiedKFold
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score
-from sklearn.metrics import f1_score, accuracy_score
-import matplotlib.pyplot as plt
-from sklearn.neural_network import MLPClassifier
 import random
+
+import matplotlib.pyplot as plt
+import numpy as np
 import xgboost
-from utils_data import get_xy_traintest
-from sklearn.model_selection import RandomizedSearchCV
-import sklearn
-import time
+from joblib import Parallel, delayed
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+from sklearn.model_selection import LeavePOut, StratifiedKFold
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler
+
 
 try:
     from IPython import get_ipython  # type: ignore
@@ -31,7 +28,11 @@ except:
 # TRAINING UTILS
 
 
-def get_cv(X_train):
+def get_cv(X_train: np.ndarray):
+    """
+    Choose a cross-validation strategy based on sample count so small datasets
+    still get a reasonable validation split.
+    """
     n_samples = X_train.shape[0]
     if n_samples <= 12:
         cv = LeavePOut(2)
@@ -43,8 +44,11 @@ def get_cv(X_train):
         cv = [(list(range(train_size)), list(range(train_size, n_samples)))]
     return cv
 
-def get_splits(cv, X_train, y_train):
-    # Generate only splits where validation has at least one of each class
+def get_splits(cv, X_train: np.ndarray, y_train: np.ndarray):
+    """
+    Filter CV splits to ensure the validation fold contains both classes.
+    Returns the original iterable untouched when ``cv`` is already a list.
+    """
     if hasattr(cv, 'split'):
         splits = []
         for train_idx, val_idx in cv.split(X_train, y_train):
@@ -56,8 +60,37 @@ def get_splits(cv, X_train, y_train):
     return splits
 
 
-def find_best_reg(X_train, y_train, X_test, y_test, plot=False, n_jobs=-1, parallel=False, penalty="l2", seed = 1, return_classifier = False):
-    # Determine cross-validation strategy
+def find_best_reg(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    plot: bool = False,
+    n_jobs: int = -1,
+    parallel: bool = False,
+    penalty: str = "l2",
+    seed: int = 1,
+    return_classifier: bool = False,
+):
+    """
+    Tune a logistic regression C value via cross-validation (when possible) and
+    return metrics on the provided test split.
+
+    Args:
+        X_train: Training features.
+        y_train: Training labels.
+        X_test: Test features.
+        y_test: Test labels.
+        plot: If True, display the validation curve over C.
+        n_jobs: Number of workers used when ``parallel`` is True.
+        parallel: Parallelize CV folds with joblib when enabled.
+        penalty: Either ``"l1"`` or ``"l2"``.
+        seed: RNG seed used for shuffling.
+        return_classifier: When True, also return the fitted classifier.
+
+    Returns:
+        Metrics dict and optionally the trained classifier.
+    """
     best_C = None
     if X_train.shape[0]>3: # cannot reliably to cross val. just going with default parameters
         cv = get_cv(X_train)
@@ -133,8 +166,26 @@ def find_best_reg(X_train, y_train, X_test, y_test, plot=False, n_jobs=-1, paral
 
 
 
-def find_best_pcareg(X_train, y_train, X_test, y_test,plot=False, max_pca_comps=100):
-    # Standardize the data
+def find_best_pcareg(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    plot: bool = False,
+    max_pca_comps: int = 100,
+):
+    """
+    Fit PCA + logistic regression, sweeping the number of components and
+    selecting the dimensionality via validation AUC.
+
+    Args:
+        X_train: Training features.
+        y_train: Training labels.
+        X_test: Test features.
+        y_test: Test labels.
+        plot: If True, plot validation AUC against PCA dimensionality.
+        max_pca_comps: Upper bound on PCA components to consider.
+    """
     scaler = StandardScaler()
     X_combined_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
@@ -207,8 +258,25 @@ def find_best_pcareg(X_train, y_train, X_test, y_test,plot=False, max_pca_comps=
 
     return metrics
 
-def find_best_knn(X_train, y_train, X_test, y_test, plot=False, n_jobs=-1):
-    # Standardize the data
+def find_best_knn(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    plot: bool = False,
+    n_jobs: int = -1,
+):
+    """
+    Tune kNN over a log-spaced set of neighbor counts and return test metrics.
+
+    Args:
+        X_train: Training features.
+        y_train: Training labels.
+        X_test: Test features.
+        y_test: Test labels.
+        plot: If True, plot validation AUC against k.
+        n_jobs: Parallel workers for evaluating folds.
+    """
     scaler = StandardScaler()
     X_combined_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)    
@@ -276,8 +344,30 @@ def find_best_knn(X_train, y_train, X_test, y_test, plot=False, n_jobs=-1):
 
     return metrics
 
-def find_best_xgboost(X_train, y_train, X_test, y_test, classification=True, binary = True, plot=False, cv_folds  =3):
-    # Check if X_train has less than 3 samples
+def find_best_xgboost(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    classification: bool = True,
+    binary: bool = True,
+    plot: bool = False,
+    cv_folds: int = 3,
+):
+    """
+    Run a lightweight random search over XGBoost hyperparameters and report
+    validation and test metrics.
+
+    Args:
+        X_train: Training features.
+        y_train: Training labels.
+        X_test: Test features.
+        y_test: Test labels.
+        classification: Present for API parity; only classification is used.
+        binary: Placeholder for potential multi-class support.
+        plot: Unused placeholder to mirror other helpers.
+        cv_folds: Number of folds (currently unused in manual split handling).
+    """
 
     # Standardize the data
     scaler = StandardScaler()
@@ -351,8 +441,28 @@ def find_best_xgboost(X_train, y_train, X_test, y_test, classification=True, bin
 
 # Example usage with a dataset
 
-def find_best_mlp(X_train, y_train, X_test, y_test, classification=True, binary = True, plot=False):
-    # Combine train and validation sets
+def find_best_mlp(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    classification: bool = True,
+    binary: bool = True,
+    plot: bool = False,
+):
+    """
+    Train a small MLP classifier, sampling a few hyperparameter settings via
+    random search and returning test metrics.
+
+    Args:
+        X_train: Training features.
+        y_train: Training labels.
+        X_test: Test features.
+        y_test: Test labels.
+        classification: Present for API parity; only classification is used.
+        binary: Placeholder for potential multi-class support.
+        plot: Included for API symmetry; plotting is not implemented.
+    """
     X_combined = X_train
     y_combined = y_train
 
@@ -440,21 +550,3 @@ def find_best_mlp(X_train, y_train, X_test, y_test, classification=True, binary 
     y_test_pred_proba = best_model.predict_proba(X_test_scaled)[:, 1]
     metrics['test_auc'] = roc_auc_score(y_test, y_test_pred_proba)
     return metrics
-
-
-
-
-
-# X_train, y_train, X_test, y_test = get_xy_traintest(823, '154_athlete_sport_football', 9, num_test = 300, model_name = 'gemma-2-9b')
-# # print(X_train.shape)
-# start_time = time.time()
-
-# # # metrics = find_best_xgboost(X_train, y_train, X_test, y_test)
-# metrics = find_best_mlp(X_train, y_train, X_test, y_test)
-
-# end_time = time.time()
-# print(f"Time taken: {end_time - start_time:.2f} seconds")
-# # print(f"scikit-learn version: {sklearn.__version__}")
-# # X_train, y_train, X_test, y_test = get_xy_traintest(numbered_dataset_tag = '5_hist_fig_ismale', num_train=1024, layer = 9)
-# metrics = find_best_reg(X_train, y_train, X_test, y_test, seed = 12)
-# print(metrics)
